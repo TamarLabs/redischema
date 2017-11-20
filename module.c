@@ -1,6 +1,7 @@
 #include "redismodule.h"
 #include <string.h>
 #include <stdlib.h>
+//#include <stdarg.h>
 
 #define MODULE_NAME "redischema"
 
@@ -18,12 +19,15 @@
 #define QUOTE_CHAR "\""
 #define SPACE_DELIMS " \t\r\n"
 #define SCHEMA_LOCATION "module:schema:order"
+#define SCHEMA_SIZE "module:schema:size"
 #define SCHEMA_ELEM_PREFIX "module:schema:elements:"
 #define QUERY_LOCATION "module:query:order"
 #define QUERY_ELEM_PREFIX "module:query:elements:"
 #define OK_STR "OK"
 #define ZRANGE_COMMAND "ZRANGE"
 #define ZRANGE_FORMAT "cll"
+#define ZCOUNT_COMMAND "ZCOUNT"
+#define ZCOUNT_FORMAT "cll"
 #define END_OF_STR '\0' //TODO: maybe delete
 #define RM_CreateString(ctx, str) RedisModule_CreateString(ctx,str,strlen(str))
 typedef enum { PARSER_INIT, PARSER_ELEM, PARSER_VAL, PARSER_DONE, PARSER_ERR } parser_status;
@@ -43,8 +47,13 @@ int delete_key(RedisModuleCtx *ctx, const char *key) {
   return rsp;
 }
 
-char* zset_get_element_by_index(RedisModuleCtx *ctx, const char *key, int index) {
-  RedisModuleCallReply *reply = RedisModule_Call(ctx,ZRANGE_COMMAND,ZRANGE_FORMAT,key,index,index);
+//char *get_one_line_response(RedisModuleCtx *ctx, const char *cmd, const char *fmt, ...) {
+char *get_one_line_response(RedisModuleCtx *ctx, const char *cmd, const char *fmt, const char *key, long i1, long i2 ) {
+  //va_list valist;
+  //va_start(valist, fmt);
+  //RedisModuleCallReply *reply = RedisModule_Call(ctx,cmd,fmt,valist);
+  RedisModuleCallReply *reply = RedisModule_Call(ctx,cmd,fmt,key,i1,i2);
+  //va_end(valist);
   RedisModuleCallReply *elem = RedisModule_CallReplyArrayElement(reply,0);
   if(elem == NULL) {
     RedisModule_FreeCallReply(reply);
@@ -57,6 +66,14 @@ char* zset_get_element_by_index(RedisModuleCtx *ctx, const char *key, int index)
   ret[len] = END_OF_STR;
   RedisModule_FreeCallReply(reply);
   return ret;
+}
+
+int get_zset_size(RedisModuleCtx *ctx, const char *key) {
+  return atoi(get_one_line_response(ctx,ZCOUNT_COMMAND,ZCOUNT_FORMAT,key,REDISMODULE_NEGATIVE_INFINITE,REDISMODULE_POSITIVE_INFINITE));
+}
+
+char* zset_get_element_by_index(RedisModuleCtx *ctx, const char *key, int index) {
+  return get_one_line_response(ctx,ZRANGE_COMMAND,ZRANGE_FORMAT,key,index,index);
 }
 
 int delete_key_with_prefix(RedisModuleCtx *ctx, const char *prefix, const char *key) {
