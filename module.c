@@ -33,11 +33,17 @@
 #define KEYS_COMMAND "keys"
 #define KEYS_FORMAT "c"
 #define ALL_KEYS "*"
+#define INCR_COMMAND "INCR"
+#define INCR_FORMAT "c"
+#define GET_COMMAND "GET"
+#define GET_FORMAT "c"
 #define END_OF_STR '\0' //TODO: maybe delete
 #define RM_CreateString(ctx, str) RedisModule_CreateString(ctx,str,strlen(str))
 typedef enum { PARSER_INIT, PARSER_ELEM, PARSER_VAL, PARSER_DONE, PARSER_ERR } PARSER_STAGE;
-typedef enum { false, true } bool; //TODO: maybe delete
+typedef enum { OP_INIT, OP_MID, OP_DONE, OP_ERR } OP_STAGE;
+typedef enum { false, true } bool;
 typedef enum { ELEM_LOC, VAL_PREFIX } LOCATIONS_OPTS;
+typedef enum { S_OP_SUM, S_OP_AVG, S_OP_MIN, S_OP_MAX, S_OP_CLR, S_OP_INC, S_OP_GET } SCHEMA_OP;
 typedef char* schema_elem_t;
 typedef struct  SCHEMALOAD_LOCATIONS {
   char *schema_loc;
@@ -59,8 +65,13 @@ typedef union parse_params {
 		SCHEMALOAD_LOCATIONS locations;
 		Query query;
 } PARSE_PARAMS;
+typedef struct op_state {
+  OP_STAGE stage;
+  SCHEMA_OP op;
+  size_t match_count;
+  float aggregate;
+} OP_STATE;
 typedef int (*parser_handler)(RedisModuleCtx*, PARSER_STATE*, PARSER_STAGE, PARSE_PARAMS*);
-
 
 #define RMUtil_RegisterReadCmd(ctx, cmd, f) \
     if (RedisModule_CreateCommand(ctx, cmd, f, "readonly fast allow-loading allow-stale", \
@@ -82,16 +93,20 @@ char* concat_prefix(const char* prefix, const char* str) {
   return ret;
 }
 
-char *get_reply_element_at(RedisModuleCallReply *reply, int index) {
-  RedisModuleCallReply *elem = RedisModule_CallReplyArrayElement(reply,index);
-  if(elem == NULL)
+char *get_string_from_reply(RedisModuleCallReply *reply) {
+  if(reply == NULL)
     return NULL;
   size_t len=0;
-  const char *elem_str = RedisModule_CallReplyStringPtr(elem, &len);
+  const char *reply_str = RedisModule_CallReplyStringPtr(reply, &len);
   char *ret = malloc((len+1)*sizeof(char));
-  memcpy(ret,elem_str,len);
+  memcpy(ret,reply_str,len);
   ret[len] = END_OF_STR;
   return ret;
+}
+
+char *get_reply_element_at(RedisModuleCallReply *reply, int index) {
+  RedisModuleCallReply *elem = RedisModule_CallReplyArrayElement(reply,index);
+  return get_string_from_reply(elem);
 }
 
 int get_zset_size(RedisModuleCtx *ctx, const char *key) {
@@ -106,6 +121,15 @@ char* zset_get_element_by_index(RedisModuleCtx *ctx, const char *key, int index)
   char *elem = get_reply_element_at(reply,0);
   RedisModule_FreeCallReply(reply);
   return elem;
+}
+
+//TODO: test for increment of float and string keys, check for errors
+int increment_key(RedisModuleCtx *ctx, const char *key) {
+  RedisModuleCallReply *reply = RedisModule_Call(ctx,INCR_COMMAND,INCR_FORMAT,key);
+  if(reply == NULL)
+    return MODULE_ERROR_INVALID_INPUT;
+  RedisModule_FreeCallReply(reply);
+  return REDISMODULE_OK;
 }
 
 int zset_get_rank(RedisModuleCtx *ctx, const char *key, const char *member) {
@@ -319,8 +343,7 @@ int SchemaLoadCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     return REDISMODULE_OK;
 }
 
-//TODO: don't need ctx here!!!!!!!!!!!!!!!!!!!!!!!!!!!
-bool match_key_to_schema(RedisModuleCtx* ctx, const char* key, Query *query) {
+bool match_key_to_schema(const char* key, Query *query) {
   char *key_dup = strdup(key);
   int e_ord = 0;
   char *token = strtok(key_dup,REDIS_HIERARCHY_DELIM);
@@ -349,29 +372,134 @@ bool match_key_to_schema(RedisModuleCtx* ctx, const char* key, Query *query) {
   return true;
 }
 
-int filter_query_results(RedisModuleCtx *ctx, Query *query) {
+long get_numeric_key(RedisModuleCtx *ctx, char const *key, OP_STATE* state) {
+  RedisModuleCallReply *reply = RedisModule_Call(ctx,GET_COMMAND,GET_FORMAT,key);
+  if(reply == NULL) {
+    state->stage = OP_ERR;
+    return REDISMODULE_ERR;
+  }
+  //TODO: go over negative infinite and change
+  float ret = atof(get_string_from_reply(reply));
+  ///////TODO: delete this
+      RedisModule_Log(ctx, "warning", "get_key (key, val, type, int_type) = (%s %lld, %d %d", key, ret, RedisModule_CallReplyType(reply), REDISMODULE_REPLY_STRING);/////////////////
+  ///////TODO: delete this
+  RedisModule_FreeCallReply(reply);
+  return ret;
+}
+
+int schema_op_init(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
+  switch (state->op) {
+    case S_OP_GET:
+      RedisModule_ReplyWithArray(ctx,REDISMODULE_POSTPONED_ARRAY_LEN);
+      break;
+    case S_OP_AVG:
+    case S_OP_SUM:
+      state->aggregate = 0;
+      break;
+    case S_OP_MIN:
+    case S_OP_MAX:
+      state->aggregate = get_numeric_key(ctx, key, state);
+      break;
+    default:
+      break;
+  }
+  state->stage = OP_MID;
+  return REDISMODULE_OK;
+}
+
+int schema_op_mid(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
+  long result=0;
+  switch (state->op) {
+    case S_OP_GET:
+      RedisModule_ReplyWithSimpleString(ctx, key);
+      break;
+    case S_OP_INC:
+      increment_key(ctx, key);
+      break;
+    case S_OP_CLR:
+      delete_key(ctx,key);
+      break;
+    case S_OP_AVG:
+    case S_OP_SUM:
+      result = get_numeric_key(ctx, key, state);
+      state->aggregate += result;
+      break;
+    case S_OP_MIN:
+      result = get_numeric_key(ctx, key, state);
+      if(result < state->aggregate)
+        state->aggregate = result;
+      break;
+    case S_OP_MAX:
+      result = get_numeric_key(ctx, key, state);
+      if(result > state->aggregate)
+        state->aggregate = result;
+      break;
+    default:
+      break;
+  }
+  state->match_count++;
+  ///////TODO: delete this
+      RedisModule_Log(ctx, "warning", "operation mid (key, res, agg) = (%s %ld %ld)", key, result, state->aggregate);/////////////////
+  ///////TODO: delete this
+  return REDISMODULE_OK;
+}
+
+//TODO: error handling + reply for all cases + reply during error
+int schema_op_done(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
+  switch (state->op) {
+    case S_OP_GET:
+      RedisModule_ReplySetArrayLength(ctx,state->match_count);
+      break;
+    case S_OP_SUM:
+    case S_OP_MIN:
+    case S_OP_MAX:
+      RedisModule_ReplyWithLongLong(ctx, state->aggregate);
+      break;
+    case S_OP_AVG:
+      RedisModule_ReplyWithLongLong(ctx, state->aggregate/state->match_count);
+      break;
+    default:
+      RedisModule_ReplyWithSimpleString(ctx, OK_STR);
+      break;
+  }
+  return REDISMODULE_OK;
+}
+
+int found_matched_key(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
+  switch (state->stage) {
+    case OP_INIT:
+      schema_op_init(ctx, key, state);
+    case OP_MID:
+      schema_op_mid(ctx, key, state);
+      break;
+    case OP_DONE:
+      schema_op_done(ctx, key, state);
+      break;
+    default:
+      break;
+  }
+  return REDISMODULE_OK;
+}
+
+int filter_results_and_reply(RedisModuleCtx *ctx, Query *query, SCHEMA_OP op) {
   RedisModuleCallReply *reply = RedisModule_Call(ctx,KEYS_COMMAND,KEYS_FORMAT,ALL_KEYS);
   size_t keys_length = RedisModule_CallReplyLength(reply);
-  size_t reply_length = 0;
+  OP_STATE state;
+  state.op = op;
+  state.stage = OP_INIT;
+  state.match_count = 0;
   for(int i=0; i < keys_length; ++i) {
     char* key = get_reply_element_at(reply,i);
-    if(match_key_to_schema(ctx, key, query)) {//TODO: don't need ctx here!!!!!!!!!!!!!!!!!
-      RedisModule_ReplyWithSimpleString(ctx, key);
-      reply_length++;
+    if(match_key_to_schema(key, query)) {
+      found_matched_key(ctx, key, &state);
     }
     free(key);
   }
   RedisModule_FreeCallReply(reply);
-  return reply_length;//////////////////////////////////TODO:change
+  state.stage = OP_DONE;
+  found_matched_key(ctx, NULL, &state);
+  return REDISMODULE_OK;
 }
-
-/*
-typedef struct Query {
-  schema_elem_t **elems;
-  size_t elems_size;
-  size_t *val_sizes;
-} Query;
-*/
 
 void build_query(RedisModuleCtx *ctx, Query *query) {
   query->elems_size = get_zset_size(ctx, SCHEMA_LOCATION);
@@ -401,29 +529,53 @@ void free_query(Query *query) {
   free(query->elems);
 }
 
-int SchemaGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
-{
-    if(argc != SCHEMA_LOAD_ARGS_LIMIT) {
-        return RedisModule_WrongArity(ctx);
-    }
-    size_t len;
-    const char *schema_def = RedisModule_StringPtrLen(argv[SCHEMA_LOAD_ARG_LIST], &len);
-    char *schema = strdup(schema_def);
-    PARSE_PARAMS params;
-    build_query(ctx, &params.query);
-    parse_input(ctx, schema, &params, SchemaGet_handler);
-    ///////TODO: delete this
-        //RedisModule_Log(ctx, "warning", "after build %s %s %s %s", params.query.elems[0][0],params.query.elems[0][1],params.query.elems[1][0],params.query.elems[1][1]);/////////////////
-    ///////TODO: delete this
-    RedisModule_ReplyWithArray(ctx,REDISMODULE_POSTPONED_ARRAY_LEN);
-    int rep_size = filter_query_results(ctx, &params.query);
-    RedisModule_ReplySetArrayLength(ctx,rep_size);
-    free(schema);
-    return REDISMODULE_OK;
+int schemaOperationsCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, SCHEMA_OP op) {
+  if(argc != SCHEMA_LOAD_ARGS_LIMIT) {
+      return RedisModule_WrongArity(ctx);
+  }
+  size_t len;
+  const char *schema_def = RedisModule_StringPtrLen(argv[SCHEMA_LOAD_ARG_LIST], &len);
+  char *schema = strdup(schema_def);
+  PARSE_PARAMS params;
+  build_query(ctx, &params.query);
+  parse_input(ctx, schema, &params, SchemaGet_handler);
+  ///////TODO: delete this
+      //RedisModule_Log(ctx, "warning", "after build %s %s %s %s", params.query.elems[0][0],params.query.elems[0][1],params.query.elems[1][0],params.query.elems[1][1]);/////////////////
+  ///////TODO: delete this
+  filter_results_and_reply(ctx, &params.query, op);
+  free(schema);
+  return REDISMODULE_OK;
 }
 
-int RedisModule_OnLoad(RedisModuleCtx *ctx)
-{
+int SchemaGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_GET);
+}
+
+int SchemaSumCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_SUM);
+}
+
+int SchemaAvgCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_AVG);
+}
+
+int SchemaMinCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_MIN);
+}
+
+int SchemaMaxCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_MAX);
+}
+
+int SchemaClrCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_CLR);
+}
+
+int SchemaIncCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_INC);
+}
+
+int RedisModule_OnLoad(RedisModuleCtx *ctx) {
     // Register the module itself
     if (RedisModule_Init(ctx, MODULE_NAME, 1, REDISMODULE_APIVER_1) ==
       REDISMODULE_ERR) {
@@ -434,6 +586,13 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx)
     RMUtil_RegisterReadCmd(ctx, "SchemaLoad",        SchemaLoadCommand);
     RMUtil_RegisterReadCmd(ctx, "SchemaClean",       SchemaCleanCommand);
     RMUtil_RegisterReadCmd(ctx, "SchemaGet",         SchemaGetCommand);
+    //schema operations
+    RMUtil_RegisterReadCmd(ctx, "SchemaSUM",         SchemaSumCommand);
+    RMUtil_RegisterReadCmd(ctx, "SchemaAVG",         SchemaAvgCommand);
+    RMUtil_RegisterReadCmd(ctx, "SchemaMIN",         SchemaMinCommand);
+    RMUtil_RegisterReadCmd(ctx, "SchemaMAX",         SchemaMaxCommand);
+    RMUtil_RegisterReadCmd(ctx, "SchemaCLR",         SchemaClrCommand);
+    RMUtil_RegisterReadCmd(ctx, "SchemaINC",         SchemaIncCommand);
 
     return REDISMODULE_OK;
 }
