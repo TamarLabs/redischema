@@ -372,7 +372,7 @@ bool match_key_to_schema(const char* key, Query *query) {
   return true;
 }
 
-long get_numeric_key(RedisModuleCtx *ctx, char const *key, OP_STATE* state) {
+float get_numeric_key(RedisModuleCtx *ctx, char const *key, OP_STATE* state) {
   RedisModuleCallReply *reply = RedisModule_Call(ctx,GET_COMMAND,GET_FORMAT,key);
   if(reply == NULL) {
     state->stage = OP_ERR;
