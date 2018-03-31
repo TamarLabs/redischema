@@ -8,14 +8,21 @@
 #define SCHEMA_LOAD_ARG_LIST 1
 #define MODULE_ERROR_INVALID_INPUT -1
 
-#define SCHEMA_START_DICT '{'
+#define OPTIONS_START_DICT "{"
+#define OPTIONS_START_DICT_SIZE  1
 #define SCHEMA_END_DICT '}'
-#define WILDCARD "*"
-#define SCHEMA_START_ARR '['
 #define SCHEMA_END_ARR ']'
-#define SCHEMA_KV_DELIM ':'
-#define SCHEMA_VAL_DELIM ','
-#define QUOTE_CHAR "\""
+#define WILDCARD "*"
+#define OPTIONS_START_VALUE "[\""
+#define OPTIONS_START_VALUE_SIZE 2
+#define QUOTE_CHAR '"'
+#define OPTIONS_END_VALUE "]}"
+#define OPTIONS_END_VALUE_SIZE 2
+#define OPTIONS_KV_DELIM ":"
+#define OPTIONS_KV_DELIM_SIZE 1
+#define OPTIONS_VAL_DELIM ","
+#define OPTIONS_VAL_DELIM_SIZE 1
+#define QUOTE_DELIM "\""
 #define SPACE_DELIMS " \t\r\n"
 #define REDIS_HIERARCHY_DELIM ":"
 #define SCHEMA_LOCATION "module:schema:order"
@@ -55,6 +62,7 @@ typedef struct PARSER_STATE {
   char *val;
   int val_ord;
   int schema_elem_ord; //this field is used in get parser, remembers the current elem ord in schema
+  bool single_value; //this field is used in parse_next_token, false if vale is in an array
 } PARSER_STATE;
 typedef struct Query {
   schema_elem_t **elems;
@@ -198,10 +206,15 @@ char* skip_spaces(char *pos) {
     return pos;
 }
 
-char* validate_next_char(char* pos, char c) {
+char* validate_next_char(char* pos, char* opts, int size) {
     pos = skip_spaces(pos);
     //pos = strtok(pos, SPACE_DELIMS);
-    if(*pos != c)
+    bool found =  false;
+    for (int i=0; i< size; ++i) {
+        if ( *pos == opts[i] )
+          found = true;
+    }
+    if(! found)
         return NULL;
     ////return strtok(NULL, ""); //get rest of string
     //pos = strtok(NULL, ""); //get rest of string
@@ -210,36 +223,37 @@ char* validate_next_char(char* pos, char c) {
     return skip_spaces(++pos);
 }
 
-PARSER_STAGE parse_next_token(char **pos, PARSER_STAGE stage, char **token) {
+PARSER_STAGE parse_next_token(char **pos, PARSER_STATE *parser, PARSER_STAGE stage, char **token) {
   char *old_pos;
   switch (stage) {
     case PARSER_INIT:
-      *pos = validate_next_char(*pos, SCHEMA_START_DICT);
+      *pos = validate_next_char(*pos, OPTIONS_START_DICT, OPTIONS_START_DICT_SIZE);
       if( *pos == NULL)
         return PARSER_ERR;
       return PARSER_ELEM;
     case PARSER_ELEM:
-      *token = strtok(*pos, QUOTE_CHAR);
+      *token = strtok(*pos, QUOTE_DELIM);
       *pos = *token + strlen(*token)+1; //skip key
-      *pos = validate_next_char(*pos, SCHEMA_KV_DELIM);
+      *pos = validate_next_char(*pos, OPTIONS_KV_DELIM, OPTIONS_KV_DELIM_SIZE);
       if( *pos == NULL)
         return PARSER_ERR;
-      *pos = validate_next_char(*pos, SCHEMA_START_ARR);
+      *pos = validate_next_char(*pos, OPTIONS_START_VALUE, OPTIONS_START_VALUE_SIZE);
       if(*pos == NULL)
         return PARSER_ERR;
+      //parser->single_value = false;//(**pos == QUOTE_CHAR)? true : false;
       return PARSER_VAL;
     case PARSER_VAL:
-      *token = strtok(*pos, QUOTE_CHAR);
+      *token = strtok(*pos, QUOTE_DELIM);
       *pos = *token + strlen(*token)+1; //skip *token
       old_pos = *pos;
-      *pos = validate_next_char(*pos, SCHEMA_VAL_DELIM);
+      *pos = validate_next_char(*pos, OPTIONS_VAL_DELIM, OPTIONS_VAL_DELIM_SIZE);
       if(*pos != NULL)
         return PARSER_VAL;
       *pos = old_pos;
-      *pos = validate_next_char(*pos, SCHEMA_END_ARR);
+      *pos = validate_next_char(*pos, OPTIONS_END_VALUE, OPTIONS_END_VALUE_SIZE);
       if(*pos == NULL)
           return PARSER_ERR;
-      *pos = validate_next_char(*pos, SCHEMA_VAL_DELIM);
+      *pos = validate_next_char(*pos, OPTIONS_VAL_DELIM, OPTIONS_VAL_DELIM_SIZE);
       if(*pos != NULL)
         return PARSER_ELEM;
       return PARSER_DONE;
@@ -303,13 +317,13 @@ int parse_input(RedisModuleCtx *ctx, char *pos, PARSE_PARAMS *params, parser_han
   *************************************************************/
   resp++;
 
-  stage = parse_next_token(&pos, PARSER_INIT, NULL);
+  stage = parse_next_token(&pos, &parser, PARSER_INIT, NULL);
   while(stage == PARSER_ELEM) {
-    stage = parse_next_token(&pos, stage, &parser.elem);
+    stage = parse_next_token(&pos, &parser, stage, &parser.elem);
     resp = handler(ctx, &parser, PARSER_ELEM, params);
     parser.val_ord = 0;
     while(stage == PARSER_VAL) {
-      stage = parse_next_token(&pos, stage, &parser.val);
+      stage = parse_next_token(&pos, &parser, stage, &parser.val);
       resp = handler(ctx, &parser, PARSER_VAL, params);
       parser.val_ord++;
     }
