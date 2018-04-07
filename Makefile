@@ -21,13 +21,16 @@ endif
 CFLAGS = -I$(RM_INCLUDE_DIR) -Wall -g -fPIC -lc -lm -O2 -std=gnu99
 CC=gcc
 
-all: module.so 
+all: module.so
 
 rmutil:
 	$(MAKE) -C $(RMUTIL_LIBDIR)
 
-module.so: module.o
-	$(LD) -o $@ module.o $(SHOBJ_LDFLAGS) $(LIBS) -lc
+module.so: module.o jsmn.o
+	$(LD) -o $@ module.o jsmn.o $(SHOBJ_LDFLAGS) $(LIBS) -lc
+
+jsmn.o: jsmn.c jsmn.h
+	$(CC) -c $(CFLAGS) $< -o $@
 
 clean:
 	rm -rf *.xo *.so *.o
