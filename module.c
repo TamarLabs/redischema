@@ -13,8 +13,6 @@
 #define SCHEMA_KEY_SET "module:schema:order"
 #define SCHEMA_SIZE "module:schema:size"
 #define SCHEMA_KEY_PREFIX "module:schema:keys:"
-#define QUERY_KEY_SET "module:query:order"
-#define QUERY_KEY_PREFIX "module:query:keys:"
 #define OK_STR "OK"
 #define ZRANGE_COMMAND "ZRANGE"
 #define ZRANGE_FORMAT "cll"
@@ -90,11 +88,11 @@ int json_walk(RedisModuleCtx *ctx, jsmntok_t *t, PARSE_PARAMS *params, parser_ha
     resp = handler(ctx, &parser, PARSER_KEY, params);
     parser.val_ord = 0;
     t++;
-    if (t->type != JSMN_ARRAY && t->type != JSMN_PRIMITIVE) //TODO: maybe add string
+    if (t->type != JSMN_ARRAY && t->type != JSMN_PRIMITIVE && t->type != JSMN_STRING)
       return REDISMODULE_ERR; //TODO handle error
-    val_count = (t->type == JSMN_PRIMITIVE)? 1 : t->size;
-    parser.single_value = (t->type == JSMN_PRIMITIVE);
-    if(val_count > 0)
+    val_count = (t->type != JSMN_ARRAY)? 1 : t->size;
+    parser.single_value = (t->type != JSMN_ARRAY);
+    if(! parser.single_value)
       t++;
     for (j=0; j < val_count; ++j) {
       parser.val = t;
@@ -264,7 +262,7 @@ int check_val_update_parser(RedisModuleCtx *ctx, PARSER_STATE* parser, PARSE_PAR
     params->query.elems[parser->schema_elem_ord][parser->val_ord] = val;
     resp = REDISMODULE_OK;
   }
-  free(val);
+  //val is not freed - will be freed when params are freed
   free(schema_key);
   free(full_key);
   return resp;
@@ -298,37 +296,12 @@ int parse_input(RedisModuleCtx *ctx, const char *input, PARSE_PARAMS *params, pa
   r = jsmn_parse(&p, input, strlen(input), tok, tokcount);//TODO: check return value of parse
   if(r<0)
     return JSMN_ERROR_NOMEM;
-  json_walk(ctx, tok, params, handler);
-  return REDISMODULE_OK;
+  return json_walk(ctx, tok, params, handler);
 }
-
-/*int parse_input(RedisModuleCtx *ctx, char *pos, PARSE_PARAMS *params, parser_handler handler) {
-  PARSER_STATE parser;
-  PARSER_STAGE stage = PARSER_INIT;
-  parser.elem_ord =0; parser.val_ord = 0;
-  int resp=0;
-  ///////////////////////////////////////////////////////
-  resp++;
-
-  stage = parse_next_token(&pos, &parser, PARSER_INIT, NULL);
-  while(stage == PARSER_ELEM) {
-    stage = parse_next_token(&pos, &parser, stage, &parser.elem);
-    resp = handler(ctx, &parser, PARSER_ELEM, params);
-    parser.val_ord = 0;
-    while(stage == PARSER_VAL) {
-      stage = parse_next_token(&pos, &parser, stage, &parser.val);
-      resp = handler(ctx, &parser, PARSER_VAL, params);
-      parser.val_ord++;
-    }
-    parser.elem_ord++;
-  }
-  return REDISMODULE_OK;
-}*/
 
 //TODO: fix reply
 int SchemaCleanCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   int resp = cleanup_schema(ctx, SCHEMA_KEY_SET, SCHEMA_KEY_PREFIX);
-  resp = cleanup_schema(ctx, QUERY_KEY_SET, QUERY_KEY_PREFIX);
   RedisModule_ReplyWithSimpleString(ctx, OK_STR);
   return resp;
 }
