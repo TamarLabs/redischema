@@ -1,25 +1,25 @@
 module load /home/orong/repos/redischema/module.so
 schemaload '{ "company": ["nike", "cnn", "amazon", "dell"], "location": ["new-york", "philadelphia", "tel-aviv"], "size": ["small", "medium", "large"] }'
 set nike:new-york:small 42
-set nike:new-york:meduim 372
+set nike:new-york:medium 372
 set nike:new-york:large 5463
 
 set nike:philadelphia:small 12
-set nike:philadelphia:meduim 35
+set nike:philadelphia:medium 35
 set nike:philadelphia:large 1261
 
 set nike:tel-aviv:small 82
-set nike:tel-aviv:meduim 99
+set nike:tel-aviv:medium 99
 set nike:tel-aviv:large 2423
 
 set cnn:new-york:small 6622
-set cnn:new-york:meduim 1
+set cnn:new-york:medium 1
 set cnn:new-york:large 846
 
 set cnn:philadelphia:small 1312
-set cnn:philadelphia:meduim 5
+set cnn:philadelphia:medium 5
 set cnn:philadelphia:large 181
 
 set cnn:tel-aviv:small 6392
-set cnn:tel-aviv:meduim 7
+set cnn:tel-aviv:medium 7
 set cnn:tel-aviv:large 273
