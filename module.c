@@ -9,10 +9,12 @@
 #define SCHEMA_LOAD_ARG_LIST 1
 #define SET_MEMBER_NOT_FOUND -1
 
+#define SINGLE_VALUE_ERR -1
 #define INVALID_INPUT "json input is invalid"
 #define NOMEM_ERROR_MSG "not enough tokens provided"
 #define VALUE_NOT_FOUND_ERROR_MSG " key or value not found in schema"
 #define NO_KEYS_MATCHED "no keys matched the given filter"
+#define SCHEMA_SET_OK_STR "schema values loaded"
 
 #define REDIS_HIERARCHY_DELIM ":"
 #define SCHEMA_KEY_SET "module:schema:order"
@@ -31,12 +33,11 @@
 #define INCR_FORMAT "c"
 #define GET_COMMAND "GET"
 #define GET_FORMAT "c"
-#define END_OF_STR '\0'
 #define RM_CreateString(ctx, str) RedisModule_CreateString(ctx,str,strlen(str))
 typedef enum { PARSER_INIT, PARSER_KEY, PARSER_VAL, PARSER_DONE, PARSER_ERR } PARSER_STAGE;
 typedef enum { OP_INIT, OP_MID, OP_DONE, OP_ERR } OP_STAGE;
 typedef enum { false, true } bool;
-typedef enum { S_OP_SUM, S_OP_AVG, S_OP_MIN, S_OP_MAX, S_OP_CLR, S_OP_INC, S_OP_GET } SCHEMA_OP;
+typedef enum { S_OP_SUM, S_OP_AVG, S_OP_MIN, S_OP_MAX, S_OP_CLR, S_OP_INC, S_OP_GET, S_OP_SET } SCHEMA_OP;
 typedef char* schema_elem_t;
 typedef struct PARSER_STATE {
   const char *input;
@@ -78,7 +79,7 @@ int report_error(RedisModuleCtx *ctx, const char *msg, PARSER_STATE *parser, PAR
 }
 
 /* walk a jason array
-   the function allows an array or a single single_value
+   the function allows an array or a single value
 */
 int walk_array(RedisModuleCtx *ctx, jsmntok_t *root, PARSER_STATE *parser, PARSE_PARAMS *params, parser_handler handler) {
   int steps = 0, resp = 0;
@@ -156,21 +157,12 @@ char* concat_prefix(const char* prefix, const char* str) {
 
 /* returned pointer must be freed
 */
-char* strcpy_len(const char *src, int size) {
-  char *str = malloc(sizeof(char)*(size+1));
-  memcpy(str, src, size);
-  str[size] = END_OF_STR;
-  return str;
-}
-
-/* returned pointer must be freed
-*/
 char *get_string_from_reply(RedisModuleCallReply *reply) {
   if(reply == NULL)
     return NULL;
   size_t len=0;
   const char *reply_str = RedisModule_CallReplyStringPtr(reply, &len);
-  char *ret = strcpy_len(reply_str, len);
+  char *ret = strndup(reply_str, len);
   return ret;
 }
 
@@ -208,11 +200,9 @@ int increment_key(RedisModuleCtx *ctx, const char *key) {
 
 int zset_get_rank(RedisModuleCtx *ctx, const char *key, const char *member) {
   RedisModuleCallReply *reply = RedisModule_Call(ctx,ZRANK_COMMAND,ZRANK_FORMAT,key,member);
-  RedisModule_Log(ctx, "warning", "before k,m,,,rank=%s,%s", key, member);
   if(reply == NULL || RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_NULL)
     return SET_MEMBER_NOT_FOUND;
   int rank = RedisModule_CallReplyInteger(reply);
-  RedisModule_Log(ctx, "warning", "after rank k,m,,,rank=%s,%s,,,%d", key, member,rank);
   RedisModule_FreeCallReply(reply);
   return rank;
 }
@@ -263,7 +253,7 @@ int insert_schema_val_for_key(RedisModuleCtx *ctx, const char* val, const char* 
 char* token_to_string(jsmntok_t *token, const char *input) {
   if(token == NULL)
     return NULL;
-  return strcpy_len(input + token->start, token->end - token->start);
+  return strndup(input + token->start, token->end - token->start);
 }
 
 int SchemaLoad_handler(RedisModuleCtx *ctx, PARSER_STATE *parser, PARSER_STAGE stage, PARSE_PARAMS *params) {
@@ -285,7 +275,6 @@ int check_key_update_parser(RedisModuleCtx *ctx, PARSER_STATE* parser, PARSE_PAR
   char *key = token_to_string(parser->key, parser->input);
   int rank = zset_get_rank(ctx, SCHEMA_KEY_SET, key), ret = SET_MEMBER_NOT_FOUND;
   if(rank == SET_MEMBER_NOT_FOUND) {
-    RedisModule_Log(ctx, "warning", "error key update");
     //char *msg = concat_prefix(key, VALUE_NOT_FOUND_ERROR_MSG);
     ret = SET_MEMBER_NOT_FOUND; // ERR: VALUE_NOT_FOUND_ERROR_MSG
   }
@@ -303,14 +292,11 @@ int check_val_update_parser(RedisModuleCtx *ctx, PARSER_STATE* parser, PARSE_PAR
   char* val = token_to_string(parser->val, parser->input);
   int resp = REDISMODULE_ERR;
   int rank = zset_get_rank(ctx, full_key, val);
-  if(rank == SET_MEMBER_NOT_FOUND) {
-    RedisModule_Log(ctx, "warning", "error val update");
+  if(rank == SET_MEMBER_NOT_FOUND)
     resp = SET_MEMBER_NOT_FOUND;
-  }
   else if (parser->val_ord >= params->query.val_sizes[parser->schema_key_ord])
     resp = SET_MEMBER_NOT_FOUND; // ERR: too many values in query
   else {
-    //TODO: add log to find if val ord is by input order or schena order
     params->query.key_set[parser->schema_key_ord][parser->val_ord] = val;
     resp = REDISMODULE_OK;
   }
@@ -320,12 +306,77 @@ int check_val_update_parser(RedisModuleCtx *ctx, PARSER_STATE* parser, PARSE_PAR
   return resp;
 }
 
+bool match_key_to_query(const char* key, Query *query) {
+  char *key_dup = strdup(key);
+  int k_ord = 0;
+  char *token = strtok(key_dup,REDIS_HIERARCHY_DELIM);
+  while (token != NULL && k_ord < query->key_set_size) {
+    bool val_match = false;
+    if(query->key_set[k_ord][0] == NULL) {
+      val_match = true;
+      goto advance_while; //No match required for this k_ord
+    }
+    for(int v_ord=0; v_ord < query->val_sizes[k_ord]; v_ord++) {
+      if(query->key_set[k_ord][v_ord] == NULL)
+        break;
+      if(strcmp(query->key_set[k_ord][v_ord], token) == 0) {
+        val_match = true;
+        break;
+      }
+    }
+    advance_while:
+    token = strtok(NULL, REDIS_HIERARCHY_DELIM);
+    k_ord++;
+    if(val_match)
+      continue;
+    free(key_dup);
+    return false;
+  }
+  free(key_dup);
+  return true;
+}
+
+int validate_key(PARSER_STATE *parser, Query* query) {
+  char *key = token_to_string(parser->key, parser->input);
+  bool match = match_key_to_query(key, query);
+  free(key);
+  return (match)? REDISMODULE_OK : REDISMODULE_ERR;
+}
+
 int SchemaOperations_handler(RedisModuleCtx *ctx, PARSER_STATE *parser, PARSER_STAGE stage, PARSE_PARAMS *params) {
   switch(stage) {
     case PARSER_KEY:
       return check_key_update_parser(ctx, parser, params);
     case PARSER_VAL:
       return check_val_update_parser(ctx, parser, params);
+    default:
+      return REDISMODULE_ERR; // ERR: INVALID_INPUT
+  }
+}
+
+int schema_set_val(RedisModuleCtx *ctx, PARSER_STATE *parser) {
+  char *key = token_to_string(parser->key, parser->input);
+  char *val = token_to_string(parser->val, parser->input);
+  RedisModuleString *key_str = RM_CreateString(ctx, key);
+  RedisModuleString *val_str = RM_CreateString(ctx, val);
+  RedisModuleKey *redis_key = RedisModule_OpenKey(ctx,key_str,REDISMODULE_WRITE);
+  int rsp = RedisModule_StringSet(redis_key, val_str);
+  RedisModule_CloseKey(redis_key);
+  RedisModule_FreeString(ctx, val_str);
+  RedisModule_FreeString(ctx, key_str);
+  free(val);
+  free(key);
+  return rsp;
+}
+
+int SchemaSet_handler(RedisModuleCtx *ctx, PARSER_STATE *parser, PARSER_STAGE stage, PARSE_PARAMS *params) {
+  switch(stage) {
+    case PARSER_KEY:
+      return validate_key(parser, &params->query);
+    case PARSER_VAL:
+      if(! parser->single_value)
+        return SINGLE_VALUE_ERR; // ERR: not single value
+      return schema_set_val(ctx, parser);
     default:
       return REDISMODULE_ERR; // ERR: INVALID_INPUT
   }
@@ -372,35 +423,6 @@ int SchemaLoadCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
       return report_error(ctx, INVALID_INPUT, &parser, &params); // ERR: change error message
     RedisModule_ReplyWithSimpleString(ctx, OK_STR);
     return REDISMODULE_OK;
-}
-
-bool match_key_to_schema(const char* key, Query *query) {
-  char *key_dup = strdup(key);
-  int e_ord = 0;
-  char *token = strtok(key_dup,REDIS_HIERARCHY_DELIM);
-  while (token != NULL && e_ord < query->key_set_size) {
-    bool val_match = false, all_nulls = true;
-    for(int v_ord=0; v_ord < query->val_sizes[e_ord]; v_ord++) {
-      if(query->key_set[e_ord][v_ord] == NULL)
-        continue;
-      if(all_nulls)
-        all_nulls = false;
-      if(strcmp(query->key_set[e_ord][v_ord], token) == 0) {
-        val_match = true;
-        break;
-      }
-    }
-    token = strtok(NULL, REDIS_HIERARCHY_DELIM);
-    e_ord++;
-    if(val_match)
-      continue;
-    if( !all_nulls) {
-      free(key_dup);
-      return false;
-    }
-  }
-  free(key_dup);
-  return true;
 }
 
 float get_numeric_key(RedisModuleCtx *ctx, char const *key, OP_STATE* state) {
@@ -470,7 +492,7 @@ int schema_op_mid(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
 }
 
 //TODO: error handling + reply for all cases + reply during error
-int schema_op_done(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
+int schema_op_done(RedisModuleCtx *ctx, OP_STATE* state) {
   switch (state->op) {
     case S_OP_GET:
       RedisModule_ReplySetArrayLength(ctx,state->match_count);
@@ -500,7 +522,7 @@ int found_matched_key(RedisModuleCtx *ctx, char *key, OP_STATE* state) {
       schema_op_mid(ctx, key, state);
       break;
     case OP_DONE:
-      schema_op_done(ctx, key, state);
+      schema_op_done(ctx, state);
       break;
     default:
       break;
@@ -517,7 +539,7 @@ int filter_results_and_reply(RedisModuleCtx *ctx, Query *query, SCHEMA_OP op) {
   state.match_count = 0;
   for(int i=0; i < keys_length; ++i) {
     char* key = get_reply_element_at(reply,i);
-    if(match_key_to_schema(key, query)) {
+    if(match_key_to_query(key, query)) {
       found_matched_key(ctx, key, &state);
     }
     free(key);
@@ -528,7 +550,7 @@ int filter_results_and_reply(RedisModuleCtx *ctx, Query *query, SCHEMA_OP op) {
   return REDISMODULE_OK;
 }
 
-void build_query(RedisModuleCtx *ctx, Query *query) {
+void build_query(RedisModuleCtx *ctx, Query *query, bool fill) {
   query->key_set_size = get_zset_size(ctx, SCHEMA_KEY_SET);
   query->key_set = malloc(sizeof(schema_elem_t*) * query->key_set_size);
   query->val_sizes = malloc(sizeof(size_t) * query->key_set_size);
@@ -538,7 +560,7 @@ void build_query(RedisModuleCtx *ctx, Query *query) {
     query->val_sizes[i] = get_zset_size(ctx, full_key);
     query->key_set[i] = malloc(sizeof(char*) * query->val_sizes[i]);
     for (int j=0; j<query->val_sizes[i]; ++j)
-      query->key_set[i][j] = NULL;
+      query->key_set[i][j]=fill?zset_get_element_by_index(ctx,full_key,j):NULL;
     free(full_key);
     free(key);
   }
@@ -563,16 +585,21 @@ int schemaOperationsCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int a
   size_t len; int resp;
   PARSE_PARAMS params; PARSER_STATE parser;
   parser.input = RedisModule_StringPtrLen(argv[SCHEMA_LOAD_ARG_LIST], &len);
-  build_query(ctx, &params.query);
-  resp = parse_input(ctx, &parser, &params, SchemaOperations_handler);
+  bool fill = (op == S_OP_SET);
+  parser_handler handler = (op == S_OP_SET)? SchemaSet_handler : SchemaOperations_handler;
+  build_query(ctx, &params.query, fill);
+  resp = parse_input(ctx, &parser, &params, handler);
   if(resp<0)
     return report_error(ctx, INVALID_INPUT, &parser, &params); // ERR: change error message
-  filter_results_and_reply(ctx, &params.query, op);
+  if(op != S_OP_SET)
+    filter_results_and_reply(ctx, &params.query, op);
+  else
+    RedisModule_ReplyWithSimpleString(ctx, SCHEMA_SET_OK_STR);
   return REDISMODULE_OK;
 }
 
 int SchemaSetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
-    return 0;//schemaOperationsCommand(ctx, argv, argc, S_OP_GET);
+    return schemaOperationsCommand(ctx, argv, argc, S_OP_SET);
 }
 
 int SchemaGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
