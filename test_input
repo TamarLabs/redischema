@@ -1,5 +1,3 @@
-module load /home/orong/repos/redischema/module.so
-schemaload '{ "company": ["nike", "cnn", "amazon", "dell"], "location": ["new-york", "philadelphia", "tel-aviv"], "size": ["small", "medium", "large"] }'
 set nike:new-york:small 42
 set nike:new-york:medium 372
 set nike:new-york:large 5463
@@ -23,3 +21,17 @@ set cnn:philadelphia:large 181
 set cnn:tel-aviv:small 6392
 set cnn:tel-aviv:medium 7
 set cnn:tel-aviv:large 273
+
+set cnn:nonecity:nonesize 273
+
+module load /home/orong/repos/redischema/redischema.so
+schemaload '{ "company": ["nike", "cnn", "amazon", "dell"], "location": ["new-york", "philadelphia", "tel-aviv"], "size": ["small", "medium", "large"] }'
+
+schemaget '{ "company": "nike", "location": "new-york", "size": "small" }'
+schemaget '{ "location": "new-york", "size": "small", "company": "nike" }'
+schemaget '{ "size": "small", "location": "new-york", "company": "nike" }'
+
+schemaget '{ "location": "philadelphia"}'
+schemaget '{ "location": "tel-aviv"}'
+schemaget '{ "size": "medium"}'
+schemaget '{ "company": "cnn"}'

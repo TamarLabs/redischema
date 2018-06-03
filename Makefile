@@ -1,4 +1,4 @@
-#set environment variable RM_INCLUDE_DIR to the location of redismodule.h
+#set environment variable RM_INCLUDE_DIR to the location of redisredischema.h
 ifndef RM_INCLUDE_DIR
 	RM_INCLUDE_DIR=./
 endif
@@ -21,13 +21,13 @@ endif
 CFLAGS = -I$(RM_INCLUDE_DIR) -Wall -g -fPIC -lc -lm -O2 -std=gnu99
 CC=gcc
 
-all: module.so
+all: redischema.so
 
 rmutil:
 	$(MAKE) -C $(RMUTIL_LIBDIR)
 
-module.so: module.o jsmn.o
-	$(LD) -o $@ module.o jsmn.o $(SHOBJ_LDFLAGS) $(LIBS) -lc
+redischema.so: redischema.o jsmn.o
+	$(LD) -o $@ redischema.o jsmn.o $(SHOBJ_LDFLAGS) $(LIBS) -lc
 
 jsmn.o: jsmn.c jsmn.h
 	$(CC) -c $(CFLAGS) $< -o $@
